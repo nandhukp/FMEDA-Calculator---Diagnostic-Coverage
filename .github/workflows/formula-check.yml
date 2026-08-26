@@ -1,0 +1,39 @@
+name: Formula Verification
+
+# Runs on every push and pull request to main. This is the deterministic,
+# free, instant check — it does NOT require any API key and cannot be
+# tampered with by a PR (since the reference values live in this repo's
+# own history, not something a contributor can quietly redefine without
+# the diff being visible in review).
+#
+# Anyone visiting the repo sees the pass/fail badge immediately — no need
+# to trust written claims about formula correctness.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:   # allow manual re-run from the Actions tab
+
+jobs:
+  verify-formulas:
+    name: Verify SPFM / LFM / PMHF formulas
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Run deterministic formula verification
+        run: PYTHONPATH=. python3 tools/verify_formulas.py
+
+      - name: Run unit tests
+        run: PYTHONPATH=. python3 -m pytest tests/ -v
