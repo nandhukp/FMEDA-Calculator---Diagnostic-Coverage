@@ -1,0 +1,4 @@
+# Optional dependencies for tools/ scripts and running the test suite.
+# The core fmeda package itself has ZERO runtime dependencies.
+pytest>=7.0        # for tests/test_calculator.py
+anthropic>=0.40    # for tools/ai_formula_audit.py (AI narrative audit; optional)

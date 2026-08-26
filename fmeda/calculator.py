@@ -248,20 +248,23 @@ class FMEDA:
         """
         Single-Point Fault Metric (ISO 26262-5, Table 3).
 
-        Per ISO 26262-5:
-            SPFM = (1 − (Σλ_SPF + Σλ_RF) / Σλ_total) × 100
-        
-        Where:
-            Σλ_SPF = cumulated failure rate of single-point faults (undetected)
-            Σλ_RF  = cumulated failure rate of residual faults (undetected portion)
-            Σλ_total = total safety-related failure rate
+        Exact formula (per source worksheet):
+            SPFM = (1 − (Σλ_SPF + Σλ_RF) / Σλ) × 100
+
+        IMPORTANT: Σλ here is the FULL total base failure rate — i.e. it
+        INCLUDES safe (non-safety-related) faults, λs. This is confirmed by
+        reconstructing the source worksheet's numbers: λ (1020.427) equals
+        λs + λMPF,det + λMPF,L + λSPF + λRF_full(covered+uncovered), NOT just
+        the safety-related subtotal. (A subtlety easy to get wrong — an
+        earlier version of this code used the safety-related-only total and
+        was off by ~2 percentage points; caught by tools/verify_formulas.py.)
 
         validated_only=True uses only test-confirmed DC values.
         """
-        lambda_total = self.lambda_dangerous_total
+        lambda_total = self.lambda_total  # FULL total, including safe faults
         if lambda_total == 0:
             return 1.0
-        
+
         lambda_uncov = self.lambda_spf_residual(validated_only)
         return (1.0 - lambda_uncov / lambda_total)
 
@@ -455,7 +458,7 @@ class FMEDA:
             "lambdaRF"           : spf_residual_uncov,
             "lambdaMPF_det"      : mpf_detected,
             "lambdaMPF_L"        : mpf_latent,
-            "lambda_total"       : self.lambda_dangerous_total,
+            "lambda_total"       : self.lambda_total,  # FULL total (incl. safe faults) — see spfm() docstring
             "lambda_spf_rf_total": spf_completely_uncov + spf_residual_uncov,
         }
 
@@ -531,10 +534,15 @@ class FMEDA:
 # ── ASIL targets ──────────────────────────────────────────────────────────────
 
 ASIL_TARGETS: Dict[str, Dict[str, Any]] = {
-    "A": {"spfm": None, "lfm": None, "pmhf_fit": 1000.0},
-    "B": {"spfm": 0.90, "lfm": 0.60, "pmhf_fit":  100.0},
-    "C": {"spfm": 0.97, "lfm": 0.80, "pmhf_fit":   10.0},
-    "D": {"spfm": 0.99, "lfm": 0.90, "pmhf_fit":    1.0},
+    # Per source worksheet (combined ISO 26262-5 Table 5 / Table 6):
+    #   ASIL A : no target for any metric
+    #   ASIL B : SPFM > 90%, LFM > 60%, PMHF < 100 FIT
+    #   ASIL C : SPFM > 97%, LFM > 80%, PMHF < 100 FIT
+    #   ASIL D : SPFM > 99%, LFM > 90%, PMHF <  10 FIT
+    "A": {"spfm": None, "lfm": None, "pmhf_fit": None},
+    "B": {"spfm": 0.90, "lfm": 0.60, "pmhf_fit": 100.0},
+    "C": {"spfm": 0.97, "lfm": 0.80, "pmhf_fit": 100.0},
+    "D": {"spfm": 0.99, "lfm": 0.90, "pmhf_fit":  10.0},
 }
 
 
@@ -565,7 +573,7 @@ def evaluate(
         "pmhf_per_hour": pm * 1e-9,
         "spfm_pass"    : (t["spfm"] is None) or (sp >= t["spfm"]),
         "lfm_pass"     : (t["lfm"]  is None) or (lf >= t["lfm"]),
-        "pmhf_pass"    : pm <= t["pmhf_fit"],
+        "pmhf_pass"    : (t["pmhf_fit"] is None) or (pm <= t["pmhf_fit"]),
     }
 
 

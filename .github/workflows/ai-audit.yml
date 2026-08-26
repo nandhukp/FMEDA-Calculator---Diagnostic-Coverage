@@ -1,0 +1,52 @@
+name: AI Formula Audit
+
+# Unlike formula-check.yml (which runs on every push, is free, and is
+# deterministic), this workflow calls the Anthropic API and therefore
+# costs tokens. It does NOT run on every push or every download — nobody
+# would want to pay for that, and there is no GitHub mechanism to trigger
+# on a clone/zip-download anyway.
+#
+# Instead it runs:
+#   - on every GitHub Release you publish (so each versioned release gets
+#     a fresh AI audit report, committed to the repo)
+#   - manually, any time, via the Actions tab ("Run workflow" button)
+#
+# Requires a repository secret named ANTHROPIC_API_KEY.
+# Settings → Secrets and variables → Actions → New repository secret.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  ai-audit:
+    name: Run AI narrative audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install anthropic SDK
+        run: pip install anthropic
+
+      - name: Run deterministic check first (fail fast, don't spend tokens on broken code)
+        run: PYTHONPATH=. python3 tools/verify_formulas.py
+
+      - name: Run AI audit
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: PYTHONPATH=. python3 tools/ai_formula_audit.py
+
+      - name: Commit audit report
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add audit_reports/
+          git diff --staged --quiet || git commit -m "chore: AI formula audit report [skip ci]"
+          git push

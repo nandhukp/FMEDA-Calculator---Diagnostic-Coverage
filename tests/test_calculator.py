@@ -37,12 +37,18 @@ def simple_fmeda() -> FMEDA:
 
 class TestSPFM:
     def test_formula(self):
-        """SPFM = 1 - SPF_uncov / dangerous_total."""
+        """
+        SPFM = 1 - (SPF+RF uncov) / lambda_total.
+        NOTE: lambda_total is the FULL total (includes the safe fault) —
+        confirmed by reconstructing the reference worksheet in
+        tools/verify_formulas.py. This differs from a naive "safety-related
+        only" denominator.
+        """
         f = simple_fmeda()
-        # dangerous = 10 + 20 + 10 = 40 FIT  (safe excluded)
-        # SPF uncov  = 10*0.10 + 20*0.05 = 1.0 + 1.0 = 2.0 FIT
-        # SPFM = 1 - 2.0/40 = 0.95
-        assert math.isclose(f.spfm(), 0.95, rel_tol=1e-6)
+        # lambda_total (ALL modes, INCLUDING the 5 FIT safe fault) = 10+20+10+5 = 45
+        # SPF+RF uncov = 10*0.10 + 20*0.05 = 1.0 + 1.0 = 2.0 FIT
+        # SPFM = 1 - 2.0/45
+        assert math.isclose(f.spfm(), 1 - 2.0 / 45, rel_tol=1e-6)
 
     def test_perfect_coverage(self):
         f = FMEDA("Perfect")
@@ -71,23 +77,40 @@ class TestSPFM:
         # SPFM = 0.95 < 0.99 → FAIL
         assert r["spfm_pass"] is False
 
-    def test_safe_faults_excluded_from_denominator(self):
-        f = FMEDA("SafeExcl")
+    def test_safe_faults_excluded_from_numerator_but_included_in_denominator(self):
+        """
+        Safe faults never contribute to the SPFM numerator (they can't be
+        single-point/residual faults by definition), but per the source
+        worksheet formula they ARE part of the lambda_total denominator.
+        This is the corrected, verified behaviour (see tools/verify_formulas.py) —
+        an earlier version of this code incorrectly excluded safe faults
+        from the denominator too.
+        """
+        f = FMEDA("SafeIncl")
         f.add(FailureMode("SAFE", "C", lambda_fit=1000.0, is_safety_related=False))
         f.add(FailureMode("SPF",  "C", lambda_fit=10.0, dc=0.99))
-        # denominator = 10, NOT 1010
-        assert math.isclose(f.spfm(), 1 - (10*0.01)/10, rel_tol=1e-6)
+        # lambda_total = 1000 + 10 = 1010  (safe fault IS counted here)
+        # numerator = 10*(1-0.99) = 0.1  (safe fault contributes 0 here)
+        assert math.isclose(f.spfm(), 1 - 0.1 / 1010, rel_tol=1e-6)
 
 
 # ── LFM tests ─────────────────────────────────────────────────────────────────
 
 class TestLFM:
     def test_formula(self):
-        """LFM = 1 - latent_uncov / latent_total."""
+        """
+        LFM = 1 - lambda_MPF,L / (lambda_total - lambda_SPF - lambda_RF).
+        NOTE: the denominator is NOT simply "latent-mode total" — it's the
+        full lambda_total (incl. safe faults) minus the SPF/RF pool. See
+        tools/verify_formulas.py for the worksheet-verified derivation.
+        """
         f = simple_fmeda()
-        # latent total = 10, uncov = 2.0
-        # LFM = 1 - 2.0/10 = 0.80
-        assert math.isclose(f.lfm(), 0.80, rel_tol=1e-6)
+        # lambda_total = 45 (incl. 5 FIT safe fault)
+        # lambda_SPF = 0 (no dc=0 non-latent modes in this fixture)
+        # lambda_RF  = 10*0.10 + 20*0.05 = 2.0
+        # lambda_MPF,L = 10*(1-0.80) = 2.0
+        # LFM = 1 - 2.0/(45-0-2.0) = 1 - 2.0/43
+        assert math.isclose(f.lfm(), 1 - 2.0 / 43, rel_tol=1e-6)
 
     def test_no_latent_modes(self):
         f = FMEDA("NoLatent")
@@ -105,11 +128,17 @@ class TestLFM:
 
 class TestPMHF:
     def test_formula(self):
-        """PMHF = SPF_uncov + latent_uncov/2."""
+        """
+        PMHF = lambda_SPF + lambda_RF (simplified formula; the dual-point
+        product term lambda_MPF,det × lambda_MPF,latent × T_lifetime is
+        omitted by default — see pmhf(full=True) for the complete formula).
+        """
         f = simple_fmeda()
-        # SPF_uncov = 2.0, latent_uncov = 2.0
-        # PMHF = 2.0 + 2.0/2 = 3.0 FIT
-        assert math.isclose(f.pmhf(), 3.0, rel_tol=1e-6)
+        # lambda_SPF = 0 (no dc=0 non-latent modes)
+        # lambda_RF  = 10*0.10 + 20*0.05 = 2.0 FIT
+        # PMHF = 0 + 2.0 = 2.0 FIT   (latent modes do NOT contribute in the
+        #                             simplified formula)
+        assert math.isclose(f.pmhf(), 2.0, rel_tol=1e-6)
 
     def test_pmhf_per_hour_conversion(self):
         f = FMEDA("PH")

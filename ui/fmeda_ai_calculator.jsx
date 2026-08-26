@@ -25,32 +25,57 @@ const C = {
   sans:      "'Inter', 'Segoe UI', system-ui, sans-serif",
 };
 
-// ── FMEDA Engine (mirrors the Python logic exactly) ─────────────────────────
+// ── FMEDA Engine (mirrors the Python fmeda/calculator.py exactly) ───────────
+// Classification (per ISO 26262-5, matching source worksheet):
+//   not safety-related            → λs (safe, excluded)
+//   safety-related + latent       → split into λMPF,det (λ×DC) and λMPF,L (λ×(1-DC))
+//   safety-related + !latent      → DC==0: λSPF (pure SPF, no safety mechanism)
+//                                    DC>0 : λRF  = λ×(1-DC)  (residual, SM exists)
+//
+//   SPFM = (1 − (Σλ_SPF + Σλ_RF) / Σλ) × 100
+//   LFM  = (1 − Σλ_MPF,L / (Σλ − Σλ_SPF − Σλ_RF)) × 100
+//   PMHF = Σλ_SPF + Σλ_RF                              (simplified, default)
 function calcFMEDA(modes) {
-  const safe = modes.filter(m => !m.isSafetyRelated);
   const dangerous = modes.filter(m => m.isSafetyRelated);
-  const spfModes = dangerous.filter(m => !m.isLatent);
-  const latentModes = dangerous.filter(m => m.isLatent);
-
   const λTotal     = modes.reduce((s,m) => s + m.lambda, 0);
-  const λSafe      = safe.reduce((s,m) => s + m.lambda, 0);
-  const λDangerous = dangerous.reduce((s,m) => s + m.lambda, 0);
-  const λSPFuncov  = spfModes.reduce((s,m) => s + m.lambda*(1-m.dc), 0);
-  const λLatTotal  = latentModes.reduce((s,m) => s + m.lambda, 0);
-  const λLatUncov  = latentModes.reduce((s,m) => s + m.lambda*(1-m.dc), 0);
+  const λSafe      = modes.filter(m => !m.isSafetyRelated).reduce((s,m) => s + m.lambda, 0);
+  const λDangerous = dangerous.reduce((s,m) => s + m.lambda, 0); // = λ in formulas
 
-  const spfm = λDangerous > 0 ? 1 - λSPFuncov/λDangerous : 1;
-  const lfm  = λLatTotal  > 0 ? 1 - λLatUncov/λLatTotal  : 1;
-  const pmhf = λSPFuncov + λLatUncov/2; // FIT
+  let λSPF = 0, λRF = 0, λMPFdet = 0, λMPFlatent = 0;
+  for (const m of dangerous) {
+    if (m.isLatent) {
+      λMPFdet    += m.lambda * m.dc;
+      λMPFlatent += m.lambda * (1 - m.dc);
+    } else if (m.dc === 0) {
+      λSPF += m.lambda;
+    } else {
+      λRF += m.lambda * (1 - m.dc);
+    }
+  }
 
-  return { λTotal, λSafe, λDangerous, λSPFuncov, λLatTotal, λLatUncov, spfm, lfm, pmhf };
+  const spfRfTotal = λSPF + λRF;
+  const lfmDenominator = λTotal - λSPF - λRF; // NOTE: λTotal (incl. safe), not λDangerous — see fmeda/calculator.py spfm() docstring
+
+  const spfm = λTotal          > 0 ? 1 - spfRfTotal / λTotal : 1;   // denominator = FULL total, incl. safe faults
+  const lfm  = lfmDenominator  > 0 ? 1 - λMPFlatent / lfmDenominator : 1;
+  const pmhf = spfRfTotal; // FIT, simplified formula (DPF product term omitted)
+
+  return {
+    λTotal, λSafe, λDangerous,
+    λSPF, λRF, λMPFdet, λMPFlatent,
+    λSPFuncov: spfRfTotal,     // kept for backward-compat with existing render code
+    λLatTotal: λMPFdet + λMPFlatent,
+    λLatUncov: λMPFlatent,
+    spfm, lfm, pmhf,
+  };
 }
 
+// Combined ISO 26262-5 Table 5 / Table 6 — ASIL A has no target for any metric
 const ASIL_TARGETS = {
-  A: { spfm: null, lfm: null,  pmhf: 1000 },
+  A: { spfm: null, lfm: null,  pmhf: null },
   B: { spfm: 0.90, lfm: 0.60,  pmhf: 100  },
-  C: { spfm: 0.97, lfm: 0.80,  pmhf: 10   },
-  D: { spfm: 0.99, lfm: 0.90,  pmhf: 1    },
+  C: { spfm: 0.97, lfm: 0.80,  pmhf: 100  },
+  D: { spfm: 0.99, lfm: 0.90,  pmhf: 10   },
 };
 
 function passStatus(val, target, higher=true) {
@@ -589,12 +614,16 @@ export default function FMEDACalculator() {
                 </div>
                 <Badge status={pmhfPass}/>
               </div>
-              <GaugeBar value={targets.pmhf/(result.pmhf||0.001)} target={1} max={2}/>
+              {targets.pmhf !== null && (
+                <GaugeBar value={targets.pmhf/(result.pmhf||0.001)} target={1} max={2}/>
+              )}
               <div style={{ fontFamily:C.mono, fontSize:10, color:C.muted }}>
-                Formula: λ_SPF_uncov + λ_latent_uncov/2
+                Formula: λ_SPF + λ_RF  (simplified, per ISO 26262-5)
               </div>
               <div style={{ fontFamily:C.mono, fontSize:11, color:C.textDim, marginTop:8 }}>
-                Target for ASIL {asil}: ≤ {targets.pmhf} FIT ({targets.pmhf}×10⁻⁹/hr)
+                {targets.pmhf !== null
+                  ? `Target for ASIL ${asil}: ≤ ${targets.pmhf} FIT (${targets.pmhf}×10⁻⁹/hr)`
+                  : `No PMHF target defined for ASIL ${asil}`}
               </div>
             </div>
 

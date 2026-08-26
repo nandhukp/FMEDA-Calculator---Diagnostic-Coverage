@@ -1,13 +1,15 @@
 # FMEDA Calculator — ISO 26262 Hardware Architectural Metrics
 
-**Author:** Nandakumar Palani  
-**Standards:** ISO 26262-5 (Tables 3, 4, Annex C) · SN 29500 · IEC TR 62380  
+**Author:** Nandakumar Palani
+**Standards:** ISO 26262-5 (Tables 3, 4, 5, 6, Annex C) · SN 29500 · IEC TR 62380
 **Python:** ≥ 3.9 · No external runtime dependencies
+
+[![Formula Verification](https://github.com/nandhukp/FMEDA-Calculator---Diagnostic-Coverage/actions/workflows/formula-check.yml/badge.svg)](https://github.com/nandhukp/FMEDA-Calculator---Diagnostic-Coverage/actions/workflows/formula-check.yml)
 
 An FMEDA (Failure Mode Effects and Diagnostic Analysis) quantifies how well
 a hardware design is protected against random faults. This tool computes the
 three ISO 26262 hardware architectural metrics — **SPFM**, **LFM**, **PMHF** —
-with two capabilities that spreadsheets cannot provide:
+with three capabilities that spreadsheets cannot provide:
 
 1. **Evidence tracking** — every DC value carries a test-evidence record
    (test case ID, validated DC, date, notes). The tool distinguishes
@@ -19,6 +21,14 @@ with two capabilities that spreadsheets cannot provide:
    The gap between the two is the **validation debt** — safety improvement
    claimed but not yet proved by test. Debt must reach zero before safety
    case closure (ISO 26262-5 Annex C requirement).
+
+3. **Verified formula correctness** — the green badge above is not decoration.
+   Every push and pull request to this repo automatically re-runs
+   `tools/verify_formulas.py`, a deterministic regression test that checks
+   SPFM/LFM/PMHF output against a known-correct reference case. See
+   [*Trusting this repo's correctness*](#trusting-this-repos-correctness)
+   below for how to verify it yourself in under a second, with no API key
+   required.
 
 ---
 
@@ -37,6 +47,12 @@ fmeda-calculator/
 │   └── safety_mcu.py          ← minimal safety MCU example
 ├── tests/
 │   └── test_calculator.py     ← unit tests (pytest)
+├── tools/
+│   ├── verify_formulas.py     ← deterministic formula regression check (CI + local)
+│   └── ai_formula_audit.py    ← on-demand AI narrative code review (needs API key)
+├── .github/workflows/
+│   ├── formula-check.yml      ← runs verify_formulas.py + tests on every push/PR
+│   └── ai-audit.yml           ← runs ai_formula_audit.py on release / manual trigger
 ├── requirements.txt
 └── README.md
 ```
@@ -96,20 +112,20 @@ PYTHONPATH=. python3 -m pytest tests/ -v
 ====================================================================
 
   Failure Rate Summary
-  λ Total                               290.00 FIT
-  λ Safe (excluded)                      64.00 FIT
+  λ Total (safety-related)              290.00 FIT
+  λ Safe (excluded from numerator)       64.00 FIT
   λ Dangerous (total)                   226.00 FIT
-  λ SPF+Residual undetected (plan)       4.450 FIT
-  λ SPF+Residual undetected (valid)     41.270 FIT   ← validation debt visible
+  λ_SPF + λ_RF undetected (plan)          4.450 FIT
+  λ_SPF + λ_RF undetected (valid)        41.270 FIT   ← validation debt visible
 
-  Metrics               Planning    Validated   Target    Result
-  SPFM                   98.03%      81.74%     ≥99%     ❌ FAIL
-  LFM                    91.94%      31.29%     ≥90%     ❌ FAIL
-  PMHF                   5.700 FIT   51.920 FIT ≤1 FIT   ❌ FAIL
+  Metrics               Planning    Validated   Target      Result
+  SPFM                   98.47%      85.77%     ≥99%       ❌ FAIL
+  LFM                    99.12%      91.44%     ≥90%       ✅ PASS
+  PMHF                    4.450 FIT   41.270 FIT ≤10 FIT   ❌ FAIL (validated)
 
   Validation Debt
   Unvalidated modes              : 6
-  SPFM debt (plan − validated)   : +0.1629    ← close this before sign-off
+  SPFM debt (plan − validated)   : +0.1270    ← close this before sign-off
 
   Validation Backlog (ranked by uncovered FIT risk)
   #1  IMU slow drift           1.000 FIT uncov   DC=80%   estimated
@@ -133,12 +149,91 @@ FMEDA.from_json(json_str)     # reload from JSON (round-trip safe)
 
 ## ISO 26262-5 targets
 
+(Combined Table 5 / Table 6 — SPFM/LFM/PMHF targets per ASIL)
+
 | ASIL | SPFM | LFM | PMHF |
 |------|------|-----|------|
-| A | — | — | < 1000 FIT |
-| B | ≥ 90% | ≥ 60% | < 100 FIT |
-| C | ≥ 97% | ≥ 80% | < 10 FIT |
-| D | ≥ 99% | ≥ 90% | < 1 FIT |
+| A | — | — | — |
+| B | > 90% | > 60% | < 100 FIT |
+| C | > 97% | > 80% | < 100 FIT |
+| D | > 99% | > 90% | < 10 FIT |
+
+**Formulas used by this tool** (matching the source worksheet exactly):
+
+```
+SPFM = (1 − (Σλ_SPF + Σλ_RF) / Σλ) × 100
+LFM  = (1 − Σλ_MPF,L / (Σλ − Σλ_SPF − Σλ_RF)) × 100
+PMHF = Σλ_SPF + Σλ_RF                                   (simplified, default)
+PMHF = Σλ_SPF + Σλ_RF + Σλ_MPF,det × Σλ_MPF,latent × T_lifetime   (full, optional)
+```
+
+Where λ_SPF is the failure rate of modes with **no** safety mechanism at all
+(DC = 0%), and λ_RF is the *uncovered* portion of modes that **do** have a
+mechanism but incomplete coverage (0% < DC < 100%). The dual-point-fault
+product term in the full PMHF formula is conventionally omitted (it's
+numerically negligible — two already-tiny FIT-scale rates multiplied
+together) unless explicitly requested via `pmhf(full=True, t_lifetime_hours=...)`.
+
+**Important denominator convention:** Σλ (the denominator in both SPFM and
+LFM) is the **total base failure rate, including safe/non-safety-related
+faults** — not a safety-related-only subtotal. This was verified by
+reconstructing the source worksheet's numbers: its stated λ (1020.427 FIT)
+only reproduces exactly when safe faults are included in the sum. This is
+a specific convention from the worksheet this tool matches — other ISO
+26262 FMEDA implementations sometimes use a safety-related-only
+denominator instead, so double-check this assumption fits your own safety
+case's methodology before citing these numbers to an auditor.
+
+---
+
+## Trusting this repo's correctness
+
+Formula bugs in a safety tool are exactly the kind of error that's
+invisible until an auditor — or a real vehicle — finds it. Rather than
+asking you to trust written claims, this repo backs correctness with three
+layers, each doing a different job:
+
+| Layer | What it checks | Cost | Runs |
+|---|---|---|---|
+| [`tools/verify_formulas.py`](tools/verify_formulas.py) | SPFM/LFM/PMHF output vs. a known-correct reference case, bit-for-bit | Free, instant | Every push/PR (CI badge above) — and you can run it yourself locally |
+| [`tests/test_calculator.py`](tests/test_calculator.py) | Unit-level formula behaviour, evidence tracking, edge cases | Free, instant | Every push/PR |
+| [`tools/ai_formula_audit.py`](tools/ai_formula_audit.py) | Narrative review: does the code's logic actually match its docstring's claimed formula? Are edge cases handled sensibly? Is terminology consistent? | Costs API tokens | On each GitHub Release, or manually via Actions tab |
+
+**Verify it yourself in one command — no trust required, no API key needed:**
+
+```bash
+git clone https://github.com/nandhukp/FMEDA-Calculator---Diagnostic-Coverage.git
+cd FMEDA-Calculator---Diagnostic-Coverage
+PYTHONPATH=. python3 tools/verify_formulas.py
+```
+
+You'll see a line-by-line comparison of every formula's output against the
+reference case, with the exact numeric delta for each check. Exit code 0
+means every formula matches; exit code 1 means something's wrong — and the
+output tells you exactly which formula and by how much.
+
+**Why isn't this automatic on every download?** GitHub has no hook that
+fires when someone clones a repo or downloads a zip — it's a static file
+transfer, not a service call. The closest practical equivalent is what's
+here: a CI badge that's re-verified on every code change (so what you see
+on the repo page reflects the current `main` branch, not a stale claim),
+plus a one-line command anyone can run themselves the moment they download
+it, plus a periodic deeper AI review tied to releases rather than to
+individual downloads (since that would mean every visitor's page-load
+silently costs someone API money).
+
+### Running the AI audit yourself
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+pip install anthropic
+PYTHONPATH=. python3 tools/ai_formula_audit.py
+```
+
+This produces a dated Markdown report in `audit_reports/` reviewing the
+calculator's formula logic against ISO 26262-5 definitions, edge-case
+handling, and terminology consistency — a second opinion from a different
+angle than the deterministic numeric check above.
 
 ---
 
