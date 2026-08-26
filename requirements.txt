@@ -1,0 +1,9 @@
+# Runtime — no external dependencies; standard library only
+# Python >= 3.9 required (dataclasses, date, Enum)
+
+# Development / testing
+pytest>=7.0
+pytest-cov>=4.0
+
+# Optional: for running the React UI locally
+# node >= 18, npm >= 9  (see ui/README.md)

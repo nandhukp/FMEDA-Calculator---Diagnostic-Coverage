@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+node_modules/
+*.csv
+*.json
+!examples/*.json
+.DS_Store
+.env
