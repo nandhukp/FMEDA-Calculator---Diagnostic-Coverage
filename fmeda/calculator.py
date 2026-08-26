@@ -248,45 +248,88 @@ class FMEDA:
         """
         Single-Point Fault Metric (ISO 26262-5, Table 3).
 
-            SPFM = 1 − Σ(λ_SPF_undetected) / Σ(λ_dangerous)
+        Per ISO 26262-5:
+            SPFM = (1 − (Σλ_SPF + Σλ_RF) / Σλ_total) × 100
+        
+        Where:
+            Σλ_SPF = cumulated failure rate of single-point faults (undetected)
+            Σλ_RF  = cumulated failure rate of residual faults (undetected portion)
+            Σλ_total = total safety-related failure rate
 
         validated_only=True uses only test-confirmed DC values.
         """
-        d = self.lambda_dangerous_total
-        if d == 0:
+        lambda_total = self.lambda_dangerous_total
+        if lambda_total == 0:
             return 1.0
-        return 1.0 - self.lambda_spf_residual(validated_only) / d
+        
+        lambda_uncov = self.lambda_spf_residual(validated_only)
+        return (1.0 - lambda_uncov / lambda_total)
 
     def lfm(self, validated_only: bool = False) -> float:
         """
         Latent Fault Metric (ISO 26262-5, Table 3).
 
-            LFM = 1 − Σ(λ_latent_undetected) / Σ(λ_latent)
+        Exact formula (per source worksheet):
+            LFM = (1 − Σλ_MPF,L / (Σλ_total − Σλ_SPF − Σλ_RF)) × 100
+
+        Where:
+            Σλ_total          = total safety-related failure rate (λ)
+            Σλ_SPF            = cumulated undetected single-point fault rate
+            Σλ_RF             = cumulated undetected residual fault rate
+            Σλ_total−ΣSPF−ΣRF = denominator = the portion of λ that is NOT
+                                 single-point/residual, i.e. the multi-point-fault
+                                 pool (both λ_MPF,detected AND λ_MPF,latent)
+
+        NOTE: This denominator is NOT simply "total latent mode λ" — it is
+        λ_total minus the SPF/RF pool, matching the source worksheet exactly.
+        (Differs subtly from a naive "latent-only total" denominator.)
 
         validated_only=True uses only test-confirmed DC values.
         """
-        lat = self.lambda_latent_total
-        if lat == 0:
+        bd = self.lambda_breakdown(validated_only)
+        denominator = bd["lambda_total"] - bd["lambdaSPF"] - bd["lambdaRF"]
+        if denominator <= 0:
             return 1.0
-        return 1.0 - self.lambda_latent_undetected(validated_only) / lat
+        return (1.0 - bd["lambdaMPF_L"] / denominator)
 
-    def pmhf(self, validated_only: bool = False) -> float:
+    def pmhf(self, validated_only: bool = False, full: bool = False,
+             t_lifetime_hours: float = 0.0) -> float:
         """
         Probabilistic Metric for random Hardware Failures, in FIT
         (ISO 26262-5, Table 4).
 
-            PMHF ≈ λ_SPF_undetected + λ_latent_undetected / 2
+        Simplified formula (default; matches source worksheet):
+            PMHF_est = Σλ_SPF + Σλ_RF
+
+        Full formula (ISO 26262-5, set full=True with t_lifetime_hours):
+            PMHF_est = Σλ_SPF + Σλ_RF + (Σλ_MPF,det × Σλ_MPF,latent × T_lifetime)
+
+        The third (dual-point-fault) term is a *product* of two already-tiny
+        FIT-scale (×10⁻⁹/hr) rates times an operational-lifetime duration in
+        hours — numerically negligible (per source worksheet note) and
+        conventionally omitted. It's included here only if full=True.
+
+        T_lifetime: operational lifetime in hours.
+            Passenger car : 1 h/day  × 365 × (service years)
+            Commercial    : 10 h/day × 365 × (service years)
 
         validated_only=True uses only test-confirmed DC values.
         """
-        return (
-            self.lambda_spf_residual(validated_only)
-            + self.lambda_latent_undetected(validated_only) / 2.0
-        )
+        bd = self.lambda_breakdown(validated_only)
+        pmhf_est = bd["lambdaSPF"] + bd["lambdaRF"]
 
-    def pmhf_per_hour(self, validated_only: bool = False) -> float:
+        if full:
+            # Convert FIT (per 1e9 hr) to per-hour rate before multiplying
+            lam_det_per_hr    = bd["lambdaMPF_det"] * 1e-9
+            lam_latent_per_hr = bd["lambdaMPF_L"]    * 1e-9
+            dpf_term_per_hr   = lam_det_per_hr * lam_latent_per_hr * t_lifetime_hours
+            pmhf_est += dpf_term_per_hr * 1e9   # convert back to FIT for display
+
+        return pmhf_est
+
+    def pmhf_per_hour(self, validated_only: bool = False, **kwargs) -> float:
         """PMHF expressed as probability per hour (FIT × 10⁻⁹)."""
-        return self.pmhf(validated_only) * 1e-9
+        return self.pmhf(validated_only, **kwargs) * 1e-9
 
     # ── Validation debt ───────────────────────────────────────────────────────
 
@@ -357,6 +400,64 @@ class FMEDA:
             key=lambda m: m.lambda_undetected(False),
             reverse=True,
         )
+
+    # ── Lambda breakdown (ISO 26262-5 terminology) ───────────────────────────
+
+    def lambda_breakdown(self, validated_only: bool = False) -> Dict[str, float]:
+        """
+        Return detailed failure rate breakdown, exactly matching the source
+        worksheet's ISO 26262-5 classification:
+
+            lambdaSPF     = Σλspf      : single-point faults, DC = 0 (no SM at all)
+            lambdaRF      = Σλrf       : residual faults, uncovered portion of a
+                                          safety-related mode that HAS a safety
+                                          mechanism (0 < DC < 100%) → λ×(1−DC)
+            lambdaMPF_det = ΣλmpfD     : latent (multi-point) faults, DETECTED
+                                          portion → λ×DC   (dual-point detected)
+            lambdaMPF_L   = Σλmpfl     : latent (multi-point) faults, UNDETECTED
+                                          portion → λ×(1−DC)  (dual-point latent)
+            lambda_total  = Σ(BFR)     : total safety-related failure rate (λ)
+
+        Classification logic per mode:
+            not safety_related        → excluded (goes to λs, safe faults)
+            safety_related + latent   → split into λMPF,det and λMPF,latent
+            safety_related + !latent  → DC==0 : λSPF   (pure single-point fault)
+                                         DC>0  : λRF    (residual fault, λ×(1−DC))
+
+        Used in:
+            SPFM = (1 − (Σλ_SPF + Σλ_RF) / Σλ_total) × 100
+            LFM  = (1 − Σλ_MPF,L / (Σλ_total − Σλ_SPF − Σλ_RF)) × 100
+            PMHF = Σλ_SPF + Σλ_RF  [+ Σλ_MPF,det×Σλ_MPF,latent×T_lifetime if full]
+        """
+        spf_completely_uncov = 0.0   # λSPF
+        spf_residual_uncov   = 0.0   # λRF
+        mpf_detected         = 0.0   # λMPF,det
+        mpf_latent           = 0.0   # λMPF,L
+
+        for m in self.modes:
+            if not m.is_safety_related:
+                continue
+
+            dc = m.effective_dc(validated_only)
+
+            if m.is_latent:
+                mpf_detected += m.lambda_fit * dc
+                mpf_latent   += m.lambda_fit * (1.0 - dc)
+            else:
+                # Non-latent, safety-related: pure SPF (no SM) vs residual (SM exists)
+                if dc == 0.0:
+                    spf_completely_uncov += m.lambda_fit
+                else:
+                    spf_residual_uncov += m.lambda_fit * (1.0 - dc)
+
+        return {
+            "lambdaSPF"          : spf_completely_uncov,
+            "lambdaRF"           : spf_residual_uncov,
+            "lambdaMPF_det"      : mpf_detected,
+            "lambdaMPF_L"        : mpf_latent,
+            "lambda_total"       : self.lambda_dangerous_total,
+            "lambda_spf_rf_total": spf_completely_uncov + spf_residual_uncov,
+        }
 
     # ── Serialisation ─────────────────────────────────────────────────────────
 
@@ -483,15 +584,29 @@ def report(fmeda: FMEDA, asil: str) -> None:
     print(sep)
 
     # ── Failure rate summary ──────────────────────────────────────────────────
-    print(f"\n  Failure Rate Summary")
+    print(f"\n  Failure Rate Summary (ISO 26262-5 Terminology)")
     print(f"  {sep2}")
-    print(f"  {'λ Total':<35} {fmeda.lambda_total:>8.2f} FIT")
+    print(f"  {'Total safety-related λ':<35} {fmeda.lambda_total:>8.2f} FIT")
     print(f"  {'λ Safe (excluded)':<35} {fmeda.lambda_safe:>8.2f} FIT")
     print(f"  {'λ Dangerous (total)':<35} {fmeda.lambda_dangerous_total:>8.2f} FIT")
-    print(f"  {'λ SPF+Residual undetected (plan)':<35} {fmeda.lambda_spf_residual(False):>8.3f} FIT")
-    print(f"  {'λ SPF+Residual undetected (valid)':<35} {fmeda.lambda_spf_residual(True):>8.3f} FIT")
-    print(f"  {'λ Latent undetected (planning)':<35} {fmeda.lambda_latent_undetected(False):>8.3f} FIT")
-    print(f"  {'λ Latent undetected (validated)':<35} {fmeda.lambda_latent_undetected(True):>8.3f} FIT")
+    
+    # ISO 26262-5 lambda breakdown (Planning mode)
+    bd_plan = fmeda.lambda_breakdown(validated_only=False)
+    print(f"\n  Planning Mode (Estimated DC):")
+    print(f"  {'  λ_SPF  (no SM at all, DC=0)':<35} {bd_plan['lambdaSPF']:>8.3f} FIT")
+    print(f"  {'  λ_RF   (SM exists, uncovered %)':<35} {bd_plan['lambdaRF']:>8.3f} FIT")
+    print(f"  {'  λ_SPF + λ_RF (total SPF+RF)':<35} {bd_plan['lambda_spf_rf_total']:>8.3f} FIT")
+    print(f"  {'  λ_MPF,det (latent, detected)':<35} {bd_plan['lambdaMPF_det']:>8.3f} FIT")
+    print(f"  {'  λ_MPF,L (latent, undetected)':<35} {bd_plan['lambdaMPF_L']:>8.3f} FIT")
+
+    # ISO 26262-5 lambda breakdown (Validated mode)
+    bd_valid = fmeda.lambda_breakdown(validated_only=True)
+    print(f"\n  Validated Mode (Test-Proven DC Only):")
+    print(f"  {'  λ_SPF  (no SM at all, DC=0)':<35} {bd_valid['lambdaSPF']:>8.3f} FIT")
+    print(f"  {'  λ_RF   (SM exists, uncovered %)':<35} {bd_valid['lambdaRF']:>8.3f} FIT")
+    print(f"  {'  λ_SPF + λ_RF (total SPF+RF)':<35} {bd_valid['lambda_spf_rf_total']:>8.3f} FIT")
+    print(f"  {'  λ_MPF,det (latent, detected)':<35} {bd_valid['lambdaMPF_det']:>8.3f} FIT")
+    print(f"  {'  λ_MPF,L (latent, undetected)':<35} {bd_valid['lambdaMPF_L']:>8.3f} FIT")
 
     # ── Metrics: Planning vs Validated ───────────────────────────────────────
     t = ASIL_TARGETS[asil]
@@ -507,13 +622,15 @@ def report(fmeda: FMEDA, asil: str) -> None:
     rp = evaluate(fmeda, asil, validated_only=False)
     rv = evaluate(fmeda, asil, validated_only=True)
 
-    print(f"\n  Metrics                       Planning      Validated     Target        Result")
+    print(f"\n  ISO 26262-5 Metrics (§5.4.3)")
     print(f"  {sep2}")
-    print(f"  {'SPFM':<28} {rp['spfm']:>8.2%}      {rv['spfm']:>8.2%}      "
+    print(f"  Metric                        Planning      Validated     Target        Result")
+    print(f"  {sep2}")
+    print(f"  {'SPFM = (1−(λ_SPF+λ_RF)/λ)×100':<28} {rp['spfm']:>8.2%}      {rv['spfm']:>8.2%}      "
           f"{fmt_target('spfm'):>10}    {mark(rv['spfm_pass'])}")
-    print(f"  {'LFM':<28} {rp['lfm']:>8.2%}      {rv['lfm']:>8.2%}      "
+    print(f"  {'LFM = (1−λ_MPF,L/(λ−λ_SPF−λ_RF))×100':<28} {rp['lfm']:>8.2%}      {rv['lfm']:>8.2%}      "
           f"{fmt_target('lfm'):>10}    {mark(rv['lfm_pass'])}")
-    print(f"  {'PMHF':<28} {rp['pmhf_fit']:>7.3f} FIT   {rv['pmhf_fit']:>7.3f} FIT   "
+    print(f"  {'PMHF = λ_SPF + λ_RF  (simplified)':<28} {rp['pmhf_fit']:>7.3f} FIT   {rv['pmhf_fit']:>7.3f} FIT   "
           f"{fmt_target('pmhf_fit'):>10}    {mark(rv['pmhf_pass'])}")
 
     # ── Validation debt ───────────────────────────────────────────────────────
